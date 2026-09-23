@@ -6,6 +6,7 @@ const { URL } = require('node:url');
 const ROOT = __dirname;
 const ACTIONS_PATH = path.join(ROOT, 'actions.json');
 const PORT = process.env.PORT || 5000;
+const DASHBOARD_URL = process.env.DASHBOARD_URL || 'http://localhost:8501';
 
 function readActions() {
   if (!fs.existsSync(ACTIONS_PATH)) return [];
@@ -452,7 +453,7 @@ function renderPage(alertMsg = '') {
         <span class="logo-icon">PDCA</span>
         <span>Gestão Logística de Ocorrências</span>
       </div>
-      <a href="http://localhost:8501" target="_blank" class="btn-dashboard">
+      <a href="${escapeHtml(DASHBOARD_URL)}" target="_blank" class="btn-dashboard">
         📊 Abrir Dashboard Gantt ↗
       </a>
     </div>
@@ -547,7 +548,7 @@ function renderPage(alertMsg = '') {
 </html>`;
 }
 
-const server = http.createServer((request, response) => {
+function handleRequest(request, response) {
   const requestUrl = new URL(request.url, `http://${request.headers.host}`);
   if (request.method === 'GET' && (requestUrl.pathname === '/' || requestUrl.pathname === '/index.html')) {
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
@@ -580,6 +581,11 @@ const server = http.createServer((request, response) => {
   }
   response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
   response.end('Página não encontrada');
-});
+}
 
-server.listen(PORT, () => console.log(`Site PDCA em http://localhost:${PORT}`));
+if (require.main === module) {
+  const server = http.createServer(handleRequest);
+  server.listen(PORT, () => console.log(`Site PDCA em http://localhost:${PORT}`));
+}
+
+module.exports = handleRequest;
