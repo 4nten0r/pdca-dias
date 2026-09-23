@@ -1,0 +1,7 @@
+{
+  "name": "pdca-site",
+  "private": true,
+  "scripts": {
+    "start": "node site.js"
+  }
+}
