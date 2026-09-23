@@ -16,3 +16,4 @@ services:
     startCommand: node site.js
     plan: free
     autoDeploy: true
+
