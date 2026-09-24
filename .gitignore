@@ -24,3 +24,10 @@ desktop.ini
 # Logs
 *.log
 
+# Imagens geradas / temporárias
+base_dano.png
+whatsapp*.jpg
+whatsapp*.jpeg
+whatsapp*.png
+whatsapp*.webp
+

@@ -9,6 +9,12 @@ const PORT = process.env.PORT || 5000;
 const DASHBOARD_URL = process.env.DASHBOARD_URL || 'http://localhost:8501';
 // Período padrão (em dias) quando o formulário não informa a data final da tratativa.
 const DEFAULT_DURATION_DAYS = 14;
+// Status aceites no formulário (qualquer outro valor é normalizado para "Planejada").
+const STATUSES = ['Planejada', 'Em andamento', 'Concluída'];
+// Limites de segurança para o corpo do POST e para os campos gravados.
+const MAX_BODY_BYTES = 64 * 1024;
+const MAX_FILIAL_CHARS = 150;
+const MAX_ACTION_CHARS = 2000;
 
 function readActions() {
   if (!fs.existsSync(ACTIONS_PATH)) return [];
@@ -20,10 +26,36 @@ function readActions() {
   }
 }
 
+// Gravação atómica (tmp + rename) para nunca deixar o actions.json a meio.
+function writeActions(actions) {
+  const tmpPath = `${ACTIONS_PATH}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(actions, null, 2), 'utf8');
+  fs.renameSync(tmpPath, ACTIONS_PATH);
+}
+
+// ID único e monotónico, compatível com os IDs gerados pelo data_store.py.
+function nextActionId(actions) {
+  let maxId = 0;
+  for (const item of actions) {
+    const numericId = Number(item.id);
+    if (Number.isFinite(numericId)) maxId = Math.max(maxId, numericId);
+  }
+  return Math.max(Date.now(), maxId + 1);
+}
+
 function saveAction(action) {
   const actions = readActions();
-  actions.push({ id: Date.now(), ...action, created_at: new Date().toISOString() });
-  fs.writeFileSync(ACTIONS_PATH, JSON.stringify(actions, null, 2), 'utf8');
+  actions.push({ id: nextActionId(actions), ...action, created_at: new Date().toISOString() });
+  writeActions(actions);
+}
+
+// Remove a tratativa pelo ID. Devolve False se não encontrou nada para apagar.
+function deleteAction(actionId) {
+  const actions = readActions();
+  const remaining = actions.filter((item) => String(item.id) !== String(actionId));
+  if (remaining.length === actions.length) return false;
+  writeActions(remaining);
+  return true;
 }
 
 function escapeHtml(value) {
@@ -58,7 +90,26 @@ function normalizeActionPeriod(item) {
   return { startDate, endDate: safeEnd || startDate };
 }
 
+// Cache invalidado por mtime/tamanho: evita reler os ~21 MB de CSV em cada render.
+let branchesCache = { key: null, value: [] };
+
+function branchSourcesKey() {
+  return ['base_pronta.csv', 'base_falta_pronta.csv', 'actions.json']
+    .map((file) => {
+      try {
+        const stat = fs.statSync(path.join(ROOT, file));
+        return `${file}:${stat.mtimeMs}:${stat.size}`;
+      } catch (error) {
+        return `${file}:missing`;
+      }
+    })
+    .join('|');
+}
+
 function readBranches() {
+  const cacheKey = branchSourcesKey();
+  if (branchesCache.key === cacheKey) return branchesCache.value;
+
   const branches = new Set(readActions().map((item) => item.filial));
   for (const file of ['base_pronta.csv', 'base_falta_pronta.csv']) {
     const filePath = path.join(ROOT, file);
@@ -75,11 +126,13 @@ function readBranches() {
       console.warn(`Aviso ao ler ${file}:`, err.message);
     }
   }
-  return [...branches].filter(Boolean).sort();
+  const value = [...branches].filter(Boolean).sort();
+  branchesCache = { key: cacheKey, value };
+  return value;
 }
 
 function renderPage(alertMsg = '') {
-  const actions = readActions().sort((a, b) => b.start_date.localeCompare(a.start_date));
+  const actions = readActions().sort((a, b) => String(b.start_date || '').localeCompare(String(a.start_date || '')));
   const branches = readBranches();
   const today = localIsoDate(new Date());
   const defaultEnd = addDaysIso(today, DEFAULT_DURATION_DAYS);
@@ -102,9 +155,15 @@ function renderPage(alertMsg = '') {
           <td data-label="Início">${escapeHtml(formatDate(period.startDate))}</td>
           <td data-label="Término">${escapeHtml(formatDate(period.endDate))}</td>
           <td data-label="Status"><span class="badge ${badgeClass}">${escapeHtml(item.status)}</span></td>
+          <td data-label="Ações" class="td-actions">
+            <form method="post" action="/actions/delete" onsubmit="return confirm('Excluir esta tratativa?');">
+              <input type="hidden" name="id" value="${escapeHtml(String(item.id ?? ''))}">
+              <button type="submit" class="btn-delete" title="Excluir tratativa" aria-label="Excluir tratativa">✕</button>
+            </form>
+          </td>
         </tr>`;
       }).join('')
-    : '<tr><td colspan="5" class="empty-state">Nenhuma tratativa cadastrada até o momento. Preencha o formulário ao lado para iniciar.</td></tr>';
+    : '<tr><td colspan="6" class="empty-state">Nenhuma tratativa cadastrada até o momento. Preencha o formulário ao lado para iniciar.</td></tr>';
 
   const options = branches.map((branch) => `<option value="${escapeHtml(branch)}">`).join('');
 
@@ -393,6 +452,35 @@ function renderPage(alertMsg = '') {
       font-weight: 700;
       letter-spacing: 0.02em;
     }
+    /* Banner de erro (falha de gravação) */
+    .alert-error {
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      color: #b91c1c;
+      border-radius: var(--radius-sm);
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
+    /* Exclusão de tratativa */
+    .td-actions { text-align: right; }
+    .td-actions form { display: inline-block; margin: 0; }
+    .btn-delete {
+      background: #fff1f2;
+      color: #be123c;
+      border: 1px solid #fecdd3;
+      border-radius: 8px;
+      width: 34px;
+      height: 34px;
+      font-size: 0.95rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background-color 0.15s, border-color 0.15s;
+    }
+    .btn-delete:hover { background: #ffe4e6; border-color: #fb7185; }
+
     .badge-plan { background: var(--badge-plan-bg); color: var(--badge-plan-text); border: 1px solid var(--badge-plan-border); }
     .badge-prog { background: var(--badge-prog-bg); color: var(--badge-prog-text); border: 1px solid var(--badge-prog-border); }
     .badge-done { background: var(--badge-done-bg); color: var(--badge-done-text); border: 1px solid var(--badge-done-border); }
@@ -505,6 +593,7 @@ function renderPage(alertMsg = '') {
   </nav>
 
   <main>
+    ${alertMsg ? `<div class="alert-error" role="alert">${escapeHtml(alertMsg)}</div>` : ''}
     <div class="hero">
       <div class="hero-eyebrow">Melhoria Contínua & Tratativas</div>
       <h1>Registro de Tratativas do PDCA</h1>
@@ -587,6 +676,7 @@ function renderPage(alertMsg = '') {
                 <th>Início</th>
                 <th>Término</th>
                 <th>Status</th>
+                <th>Ações</th>
               </tr>
             </thead>
             <tbody>
@@ -643,40 +733,106 @@ function renderPage(alertMsg = '') {
 </html>`;
 }
 
+// Lê o corpo do formulário com limite de tamanho (protege contra POSTs gigantes).
+function readFormBody(request, callback) {
+  let body = '';
+  let finished = false;
+  request.on('data', (chunk) => {
+    if (finished) return;
+    body += chunk;
+    if (body.length > MAX_BODY_BYTES) {
+      finished = true;
+      callback(null);
+    }
+  });
+  request.on('end', () => {
+    if (finished) return;
+    finished = true;
+    callback(new URLSearchParams(body));
+  });
+  request.on('error', () => {
+    if (finished) return;
+    finished = true;
+    callback(null);
+  });
+}
+
+function redirect(response, location) {
+  response.writeHead(303, { Location: location });
+  response.end();
+}
+
+function payloadTooLarge(response) {
+  response.writeHead(413, { 'Content-Type': 'text/plain; charset=utf-8' });
+  response.end('Conteúdo do formulário demasiado grande');
+}
+
 function handleRequest(request, response) {
   const requestUrl = new URL(request.url, `http://${request.headers.host}`);
-  if (request.method === 'GET' && (requestUrl.pathname === '/' || requestUrl.pathname === '/index.html')) {
+  const pathname = requestUrl.pathname;
+
+  if (request.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
+    const alertMsg = requestUrl.searchParams.get('erro') === 'gravacao'
+      ? 'Não foi possível gravar a alteração no actions.json. Tente novamente.'
+      : '';
     response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    response.end(renderPage());
+    response.end(renderPage(alertMsg));
     return;
   }
-  if (request.method === 'POST' && requestUrl.pathname === '/actions') {
-    let body = '';
-    request.on('data', (chunk) => { body += chunk; });
-    request.on('end', () => {
-      const form = new URLSearchParams(body);
-      const filial = form.get('filial') || '';
-      const action = form.get('action') || '';
+
+  if (request.method === 'POST' && pathname === '/actions') {
+    readFormBody(request, (form) => {
+      if (!form) {
+        payloadTooLarge(response);
+        return;
+      }
+      const filial = (form.get('filial') || '').trim().slice(0, MAX_FILIAL_CHARS);
+      const action = (form.get('action') || '').trim().slice(0, MAX_ACTION_CHARS);
       const startDate = (form.get('start_date') || '').trim();
       const endDate = (form.get('end_date') || '').trim();
-      const status = form.get('status') || 'Planejada';
+      const rawStatus = (form.get('status') || '').trim();
+      const status = STATUSES.includes(rawStatus) ? rawStatus : 'Planejada';
 
-      if (filial.trim() && action.trim() && startDate) {
-        const period = normalizeActionPeriod({ start_date: startDate, end_date: endDate });
-        saveAction({
-          filial: filial.trim(),
-          action: action.trim(),
-          start_date: period.startDate,
-          end_date: period.endDate,
-          status: status.trim()
-        });
+      if (filial && action && startDate) {
+        try {
+          const period = normalizeActionPeriod({ start_date: startDate, end_date: endDate });
+          saveAction({
+            filial,
+            action,
+            start_date: period.startDate,
+            end_date: period.endDate,
+            status
+          });
+        } catch (error) {
+          console.error('Falha ao gravar tratativa:', error.message);
+          redirect(response, '/?erro=gravacao');
+          return;
+        }
       }
-
-      response.writeHead(303, { Location: '/' });
-      response.end();
+      redirect(response, '/');
     });
     return;
   }
+
+  if (request.method === 'POST' && pathname === '/actions/delete') {
+    readFormBody(request, (form) => {
+      if (!form) {
+        payloadTooLarge(response);
+        return;
+      }
+      try {
+        const id = form.get('id');
+        if (id) deleteAction(id);
+      } catch (error) {
+        console.error('Falha ao excluir tratativa:', error.message);
+        redirect(response, '/?erro=gravacao');
+        return;
+      }
+      redirect(response, '/');
+    });
+    return;
+  }
+
   response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
   response.end('Página não encontrada');
 }

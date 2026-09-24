@@ -1,4 +1,7 @@
 import datetime
+import json
+import os
+import time
 from pathlib import Path
 import json
 from typing import Any
@@ -12,6 +15,17 @@ MISSING_CSV = ROOT / "base_falta_pronta.csv"
 
 ACTION_COLUMNS = ["id", "filial", "action", "start_date", "end_date", "status"]
 DEFAULT_DURATION_DAYS = 14
+STATUS_VALUES = ("Planejada", "Em andamento", "Concluída")
+MAX_FILIAL_CHARS = 150
+MAX_ACTION_CHARS = 2000
+
+def source_mtime() -> float:
+    """Mtime mais recente dos CSVs — chave de cache do Streamlit (evita reler os ~21 MB)."""
+    return max((path.stat().st_mtime for path in (DAMAGE_CSV, MISSING_CSV) if path.exists()), default=0.0)
+
+def actions_mtime() -> float:
+    """Mtime do actions.json — invalida o cache quando o site/dashboard grava."""
+    return ACTIONS_PATH.stat().st_mtime if ACTIONS_PATH.exists() else 0.0
 
 
 def default_end_date(start_date: str, days: int = DEFAULT_DURATION_DAYS) -> str:
@@ -26,6 +40,22 @@ def init_db() -> None:
     if not ACTIONS_PATH.exists():
         ACTIONS_PATH.write_text("[]", encoding="utf-8")
 
+def _write_actions(actions: list) -> None:
+    """Grava o actions.json de forma atómica (tmp + replace) para evitar ficheiros corrompidos."""
+    tmp_path = ACTIONS_PATH.with_name(ACTIONS_PATH.name + ".tmp")
+    tmp_path.write_text(json.dumps(actions, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp_path, ACTIONS_PATH)
+
+def _next_action_id(actions: list) -> int:
+    """ID único e monotónico, compatível com os IDs (Date.now) gerados pelo site.js."""
+    max_id = 0
+    for item in actions:
+        try:
+            max_id = max(max_id, int(item.get("id") or 0))
+        except (TypeError, ValueError):
+            continue
+    return max(int(time.time() * 1000), max_id + 1)
+
 def save_action(filial: str, action: str, start_date: str, end_date: str = "", status: str = "Planejada") -> None:
     init_db()
     actions = json.loads(ACTIONS_PATH.read_text(encoding="utf-8"))
@@ -33,15 +63,28 @@ def save_action(filial: str, action: str, start_date: str, end_date: str = "", s
     end_date = str(end_date).strip()
     if not end_date or end_date <= start_date:
         end_date = default_end_date(start_date)
+    safe_status = str(status).strip()
+    if safe_status not in STATUS_VALUES:
+        safe_status = "Planejada"
     actions.append({
-        "id": len(actions) + 1,
-        "filial": filial.strip(),
-        "action": action.strip(),
+        "id": _next_action_id(actions),
+        "filial": str(filial).strip()[:MAX_FILIAL_CHARS],
+        "action": str(action).strip()[:MAX_ACTION_CHARS],
         "start_date": start_date,
         "end_date": end_date,
-        "status": status,
+        "status": safe_status,
     })
-    ACTIONS_PATH.write_text(json.dumps(actions, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_actions(actions)
+
+def delete_action(action_id) -> bool:
+    """Remove a tratativa com o ID indicado. Devolve True se algo foi removido."""
+    init_db()
+    actions = json.loads(ACTIONS_PATH.read_text(encoding="utf-8"))
+    remaining = [item for item in actions if str(item.get("id")) != str(action_id)]
+    if len(remaining) == len(actions):
+        return False
+    _write_actions(remaining)
+    return True
 
 def read_actions() -> pd.DataFrame:
     init_db()

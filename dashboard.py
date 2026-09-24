@@ -1,11 +1,19 @@
 import datetime
-from typing import List, Tuple
+from typing import Tuple
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from data_store import init_db, read_actions, read_occurrences
+from data_store import (
+    DEFAULT_DURATION_DAYS,
+    actions_mtime,
+    init_db,
+    read_actions,
+    read_occurrences,
+    save_action,
+    source_mtime,
+)
 
 # ---------------------------------------------------------
 # Configuração da Página e Design Corporativo
@@ -145,11 +153,22 @@ html, body, [class*="css"] {
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Carregamento de Dados
+# Carregamento de Dados (cache por mtime: evita reler os ~21 MB de CSV a cada
+# interação; o cache invalida-se sozinho quando os CSVs ou o actions.json mudam)
 # ---------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_occurrences(mtime: float) -> pd.DataFrame:
+    return read_occurrences()
+
+
+@st.cache_data(show_spinner=False)
+def load_actions(mtime: float) -> pd.DataFrame:
+    return read_actions()
+
+
 init_db()
-occurrences = read_occurrences()
-actions = read_actions()
+occurrences = load_occurrences(source_mtime())
+actions = load_actions(actions_mtime())
 
 # ---------------------------------------------------------
 # Barra Lateral - Filtros Corporativos
@@ -219,7 +238,7 @@ with st.sidebar:
             form_filial = st.selectbox("Filial da Tratativa", branches_all)
             form_action = st.text_area("Descrição da Tratativa", placeholder="Ex.: Treinamento de conferência e auditoria de carga")
             form_start = st.date_input("Data de Início", value=datetime.date.today())
-            form_end = st.date_input("Data Final", value=datetime.date.today() + datetime.timedelta(days=14))
+            form_end = st.date_input("Data Final", value=datetime.date.today() + datetime.timedelta(days=DEFAULT_DURATION_DAYS))
             form_status = st.selectbox("Status da Tratativa", ["Planejada", "Em andamento", "Concluída"], index=1)
             btn_save = st.form_submit_button("Salvar Tratativa no PDCA", use_container_width=True)
             if btn_save:
@@ -228,12 +247,12 @@ with st.sidebar:
                 elif form_end < form_start:
                     st.error("A data final precisa ser igual ou posterior à data de início.")
                 else:
-                    from data_store import save_action
                     save_action(form_filial, form_action, str(form_start), str(form_end), form_status)
                     st.success("✅ Tratativa salva com sucesso!")
                     st.rerun()
 
     st.info("💡 As tratativas também podem ser cadastradas pelo portal web em `node site.js` (http://localhost:5000). É o `site.js` que alimenta esta lista.")
+
 
 # ---------------------------------------------------------
 # Pré-processamento Temporal dos Dados (filial em foco)
@@ -309,7 +328,6 @@ dano_qty = int(df[df["type"] == "Dano"]["quantity"].sum()) if not df.empty else 
 
 # Tratativas registradas para a filial em foco (alimentadas pelo site.js / actions.json)
 filial_actions = actions[actions["filial"] == foco_filial].copy() if not actions.empty else actions.copy()
-action_count = len(actions) if not actions.empty else 0
 active_actions = len(actions[actions["status"] == "Em andamento"]) if not actions.empty else 0
 
 # ---------------------------------------------------------
@@ -351,6 +369,11 @@ def format_variation(before: float, after: float) -> Tuple[str, str]:
     return "● Estável no período", "#94a3b8"
 
 
+def fmt_int(value: float) -> str:
+    """Formata inteiros com ponto de milhar sem tocar no restante HTML."""
+    return f"{value:,.0f}".replace(",", ".")
+
+
 dano_delta_text, dano_delta_color = format_variation(dano_before, dano_after)
 falta_delta_text, falta_delta_color = format_variation(falta_before, falta_after)
 dano_numbers = f"{dano_before:,.0f} → {dano_after:,.0f}".replace(",", ".")
@@ -362,28 +385,28 @@ with kpi_col1:
     st.markdown(f"""
     <div class="kpi-container">
         <div class="kpi-title">Total de Ocorrências</div>
-        <div class="kpi-value">{total_qty:,.0f}</div>
+        <div class="kpi-value">{fmt_int(total_qty)}</div>
         <div class="kpi-sub">Filial em foco: <b>{foco_filial}</b></div>
     </div>
-    """.replace(",", "."), unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
 with kpi_col2:
     st.markdown(f"""
     <div class="kpi-container" style="border-top-color: #0284c7;">
         <div class="kpi-title">NC Falta Registrado</div>
-        <div class="kpi-value" style="color: #38bdf8;">{falta_qty:,.0f}</div>
+        <div class="kpi-value" style="color: #38bdf8;">{fmt_int(falta_qty)}</div>
         <div class="kpi-sub">{(falta_qty / total_qty * 100 if total_qty else 0):.1f}% do volume da filial</div>
     </div>
-    """.replace(",", "."), unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
 with kpi_col3:
     st.markdown(f"""
     <div class="kpi-container">
         <div class="kpi-title">PPM Dano Registrado</div>
-        <div class="kpi-value" style="color: #fb923c;">{dano_qty:,.0f}</div>
+        <div class="kpi-value" style="color: #fb923c;">{fmt_int(dano_qty)}</div>
         <div class="kpi-sub">{(dano_qty / total_qty * 100 if total_qty else 0):.1f}% do volume da filial</div>
     </div>
-    """.replace(",", "."), unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
 with kpi_col4:
     st.markdown(f"""
@@ -439,6 +462,7 @@ else:
         df.groupby(["type", "period_start", "period_end", "period_label"], as_index=False)["quantity"]
         .sum()
     )
+    unique_starts = sorted(pd.to_datetime(gantt_occ["period_start"].dropna().unique()))
     gantt_occ["filial"] = foco_filial
     gantt_occ["task"] = gantt_occ["type"].map({"Dano": "PPM Dano", "Falta": "NC Falta"}).fillna(gantt_occ["type"])
     gantt_occ["category"] = gantt_occ["task"]
@@ -459,7 +483,7 @@ else:
 
     # 2. Tratativas (PDCA) da filial: barra dupla (concluído x restante) + marcos
     today = pd.Timestamp.today().normalize()
-    default_duration = pd.Timedelta(days=30 if is_monthly else 14)
+    default_duration = pd.Timedelta(days=30 if is_monthly else DEFAULT_DURATION_DAYS)
     segments = gantt_occ[["task", "category", "seg_start", "seg_end", "label", "hover"]].copy()
     milestones = []
     task_order = [task for task in ["NC Falta", "PPM Dano"] if task in set(gantt_occ["task"])]
@@ -794,11 +818,22 @@ else:
             impact_actions = impact_actions.dropna(subset=["start_dt"]).sort_values("start_dt")
 
             filial_history = occurrences[occurrences["filial"] == foco_filial]
+
+            def badge(before_value: float, after_value: float) -> str:
+                if before_value <= 0:
+                    return "🟡 Em monitoramento inicial"
+                delta = ((after_value - before_value) / before_value) * 100
+                if delta < -0.5:
+                    return f"🟢 Redução de {abs(delta):.1f}%"
+                if delta > 0.5:
+                    return f"🔴 Aumento de +{delta:.1f}%"
+                return "⚪ Estável"
+
             impact_results = []
             for _, act in impact_actions.iterrows():
                 act_date = act["start_dt"]
-                act_end = act["end_dt"] if pd.notna(act["end_dt"]) and act["end_dt"] > act_date else act_date + pd.Timedelta(days=14)
-                janela = max((act_end - act_date).days, 14)
+                act_end = act["end_dt"] if pd.notna(act["end_dt"]) and act["end_dt"] > act_date else act_date + pd.Timedelta(days=DEFAULT_DURATION_DAYS)
+                janela = max((act_end - act_date).days, DEFAULT_DURATION_DAYS)
 
                 before_data = filial_history[
                     (filial_history["date"] >= act_date - pd.Timedelta(days=janela)) &
@@ -813,16 +848,6 @@ else:
                 falta_after = int(after_data[after_data["type"] == "Falta"]["quantity"].sum())
                 dano_before = int(before_data[before_data["type"] == "Dano"]["quantity"].sum())
                 dano_after = int(after_data[after_data["type"] == "Dano"]["quantity"].sum())
-
-                def badge(before_value: float, after_value: float) -> str:
-                    if before_value <= 0:
-                        return "🟡 Em monitoramento inicial"
-                    delta = ((after_value - before_value) / before_value) * 100
-                    if delta < -0.5:
-                        return f"🟢 Redução de {abs(delta):.1f}%"
-                    if delta > 0.5:
-                        return f"🔴 Aumento de +{delta:.1f}%"
-                    return "⚪ Estável"
 
                 impact_results.append({
                     "Tratativa PDCA": act["action"],
@@ -894,7 +919,7 @@ if not df.empty:
 
         for _, act in rel_actions.dropna(subset=["start_dt"]).iterrows():
             act_dt = act["start_dt"]
-            act_end_dt = act["end_dt"] if pd.notna(act["end_dt"]) and act["end_dt"] > act_dt else act_dt + pd.Timedelta(days=14)
+            act_end_dt = act["end_dt"] if pd.notna(act["end_dt"]) and act["end_dt"] > act_dt else act_dt + pd.Timedelta(days=DEFAULT_DURATION_DAYS)
             if act_dt <= max_p + pd.Timedelta(days=7) and act_end_dt >= min_p - pd.Timedelta(days=7):
                 line_fig.add_vrect(
                     x0=act_dt,
