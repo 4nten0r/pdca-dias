@@ -4,7 +4,29 @@ const path = require('node:path');
 const { URL } = require('node:url');
 
 const ROOT = __dirname;
-const ACTIONS_PATH = path.join(ROOT, 'actions.json');
+// Na Vercel o sistema de ficheiros da função serverless é read-only; apenas /tmp
+// é gravável. Em produção usa-se /tmp/actions.json (efémero por instância, semeado
+// a partir do actions.json empacotado); em ambiente local mantém-se a pasta do projeto.
+const ON_VERCEL = Boolean(process.env.VERCEL);
+const LOCAL_ACTIONS_PATH = path.join(ROOT, 'actions.json');
+const VERCEL_ACTIONS_PATH = '/tmp/actions.json';
+
+function resolveActionsPath() {
+  if (!ON_VERCEL) return LOCAL_ACTIONS_PATH;
+  if (fs.existsSync(VERCEL_ACTIONS_PATH)) return VERCEL_ACTIONS_PATH;
+  try {
+    if (fs.existsSync(LOCAL_ACTIONS_PATH)) {
+      fs.copyFileSync(LOCAL_ACTIONS_PATH, VERCEL_ACTIONS_PATH);
+    } else {
+      fs.writeFileSync(VERCEL_ACTIONS_PATH, '[]', 'utf8');
+    }
+  } catch (error) {
+    console.warn('Aviso: não foi possível preparar o actions.json em /tmp:', error.message);
+  }
+  return VERCEL_ACTIONS_PATH;
+}
+
+const ACTIONS_PATH = resolveActionsPath();
 const PORT = process.env.PORT || 5000;
 const DASHBOARD_URL = process.env.DASHBOARD_URL || 'http://localhost:8501';
 // Período padrão (em dias) quando o formulário não informa a data final da tratativa.
@@ -735,6 +757,29 @@ function renderPage(alertMsg = '') {
 
 // Lê o corpo do formulário com limite de tamanho (protege contra POSTs gigantes).
 function readFormBody(request, callback) {
+  // Na Vercel o corpo do POST já vem analisado em request.body e o stream pode já
+  // ter sido consumido pela plataforma — nesse caso usa-se diretamente o objeto.
+  if (request.body !== undefined && request.body !== null) {
+    if (Buffer.isBuffer(request.body)) {
+      if (request.body.length > MAX_BODY_BYTES) { callback(null); return; }
+      callback(new URLSearchParams(request.body.toString('utf8')));
+      return;
+    }
+    if (typeof request.body === 'string') {
+      if (request.body.length > MAX_BODY_BYTES) { callback(null); return; }
+      callback(new URLSearchParams(request.body));
+      return;
+    }
+    if (typeof request.body === 'object') {
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(request.body)) {
+        if (value === undefined || value === null) continue;
+        params.append(key, Array.isArray(value) ? String(value.join(',')) : String(value));
+      }
+      callback(params);
+      return;
+    }
+  }
   let body = '';
   let finished = false;
   request.on('data', (chunk) => {
@@ -767,8 +812,8 @@ function payloadTooLarge(response) {
   response.end('Conteúdo do formulário demasiado grande');
 }
 
-function handleRequest(request, response) {
-  const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+function handleRequestImpl(request, response) {
+  const requestUrl = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
   const pathname = requestUrl.pathname;
 
   if (request.method === 'GET' && (pathname === '/' || pathname === '/index.html')) {
@@ -835,6 +880,20 @@ function handleRequest(request, response) {
 
   response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
   response.end('Página não encontrada');
+}
+
+// Envolve o handler para nunca derrubar a função serverless da Vercel com uma
+// exceção não apanhada (a plataforma devolveria FUNCTION_INVOCATION_FAILED).
+function handleRequest(request, response) {
+  try {
+    handleRequestImpl(request, response);
+  } catch (error) {
+    console.error('Erro interno ao processar o pedido:', error.message);
+    if (!response.headersSent) {
+      response.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+    }
+    response.end('Erro interno do servidor');
+  }
 }
 
 if (require.main === module) {

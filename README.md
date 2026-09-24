@@ -44,6 +44,9 @@ O dashboard abrirá em `http://localhost:8501`.
 - **KPIs corrigidos**: a formatação de milhares já não altera o HTML (nomes de filial com vírgula ficam intactos).
 - Constante única `DEFAULT_DURATION_DAYS = 14` partilhada entre o dashboard, o site e o `data_store.py`.
 
-## Limitação na Vercel
+## Na Vercel (deploy de produção)
 
-O sistema de ficheiros da função serverless é **efémero**: no deploy da Vercel, alterações feitas via `api/index.js` são perdidas entre invocações. Para persistência real em produção, migrar `actions.json` para um armazenamento externo (Blob/KV/base de dados). O uso local (`node site.js`) não é afetado.
+- Na Vercel o `site.js` **não corre como servidor** (`node site.js` só existe localmente): todo o tráfego é encaminhado por `vercel.json` para `api/index.js`, que reexporta o `handleRequest` do `site.js` como função serverless.
+- O filesystem da função é **read-only**; as gravações usam `/tmp/actions.json` (único diretório gravável). Esse ficheiro é **efémero** — sobrevive a pedidos na mesma instância quente, mas não entre invocações frias nem deploys. Para persistência real, migrar `actions.json` para Vercel Blob/KV/base de dados.
+- O botão **"Abrir Dashboard Gantt"** usa a variável de ambiente `DASHBOARD_URL` (por omissão `http://localhost:8501`). Defina-a nas *Environment Variables* da Vercel com o URL público do dashboard Streamlit (ex.: o serviço `pdca-dashboard` do `render.yaml`, no Render — o Streamlit não corre na Vercel).
+- Para atualizar o deploy ligado ao GitHub: `git push origin main` (a Vercel faz redeploy automático). Se o deploy foi feito com a Vercel CLI, volte a correr `vercel --prod`.
