@@ -1,3 +1,4 @@
+import datetime
 from pathlib import Path
 import json
 from typing import Any
@@ -9,22 +10,54 @@ ACTIONS_PATH = ROOT / "actions.json"
 DAMAGE_CSV = ROOT / "base_pronta.csv"
 MISSING_CSV = ROOT / "base_falta_pronta.csv"
 
+ACTION_COLUMNS = ["id", "filial", "action", "start_date", "end_date", "status"]
+DEFAULT_DURATION_DAYS = 14
+
+
+def default_end_date(start_date: str, days: int = DEFAULT_DURATION_DAYS) -> str:
+    """Calcula a data final padrão (início + 14 dias) quando o término não é informado."""
+    try:
+        start = datetime.date.fromisoformat(str(start_date)[:10])
+    except (TypeError, ValueError):
+        return ""
+    return (start + datetime.timedelta(days=days)).isoformat()
+
 def init_db() -> None:
     if not ACTIONS_PATH.exists():
         ACTIONS_PATH.write_text("[]", encoding="utf-8")
 
-def save_action(filial: str, action: str, start_date: str, status: str) -> None:
+def save_action(filial: str, action: str, start_date: str, end_date: str = "", status: str = "Planejada") -> None:
     init_db()
     actions = json.loads(ACTIONS_PATH.read_text(encoding="utf-8"))
-    actions.append({"id": len(actions) + 1, "filial": filial.strip(), "action": action.strip(), "start_date": start_date, "status": status})
+    start_date = str(start_date).strip()
+    end_date = str(end_date).strip()
+    if not end_date or end_date <= start_date:
+        end_date = default_end_date(start_date)
+    actions.append({
+        "id": len(actions) + 1,
+        "filial": filial.strip(),
+        "action": action.strip(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "status": status,
+    })
     ACTIONS_PATH.write_text(json.dumps(actions, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def read_actions() -> pd.DataFrame:
     init_db()
     actions = json.loads(ACTIONS_PATH.read_text(encoding="utf-8"))
-    return pd.DataFrame(actions, columns=["id", "filial", "action", "start_date", "status"]).sort_values(
-        ["start_date", "id"], ascending=False
-    ) if actions else pd.DataFrame(columns=["id", "filial", "action", "start_date", "status"])
+    if not actions:
+        return pd.DataFrame(columns=ACTION_COLUMNS)
+    frame = pd.DataFrame(actions)
+    for column in ACTION_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = ""
+    # Compatibilidade com registros antigos gravados sem data final (início + 14 dias)
+    frame["end_date"] = [
+        str(value).strip() or default_end_date(start)
+        for value, start in zip(frame["end_date"], frame["start_date"])
+    ]
+    return frame[ACTION_COLUMNS].sort_values(["start_date", "id"], ascending=False)
 
 def _read_csv(path: Path) -> pd.DataFrame:
     for encoding in ("utf-8-sig", "latin1"):

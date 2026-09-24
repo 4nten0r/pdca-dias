@@ -10,8 +10,7 @@ if %errorlevel% equ 0 (
     echo Iniciando site.js com o Node detectado no sistema...
     "%PLAYWRIGHT_NODE%" site.js
 ) else (
-    echo Node nao encontrado diretamente no PATH. Executando versao Python...
-    python site.py
+    echo Node.js nao encontrado. Instale o Node ^(https://nodejs.org^) para rodar o site.js.
 )
 pause
 

@@ -7,6 +7,8 @@ const ROOT = __dirname;
 const ACTIONS_PATH = path.join(ROOT, 'actions.json');
 const PORT = process.env.PORT || 5000;
 const DASHBOARD_URL = process.env.DASHBOARD_URL || 'http://localhost:8501';
+// Período padrão (em dias) quando o formulário não informa a data final da tratativa.
+const DEFAULT_DURATION_DAYS = 14;
 
 function readActions() {
   if (!fs.existsSync(ACTIONS_PATH)) return [];
@@ -28,6 +30,32 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (character) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
   }[character]));
+}
+
+function localIsoDate(date) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+// Soma dias em uma data ISO (YYYY-MM-DD) mantendo o fuso local do formulário.
+function addDaysIso(isoDate, days) {
+  const parts = String(isoDate || '').split('-').map(Number);
+  if (parts.length !== 3 || parts.some((value) => !Number.isFinite(value))) return '';
+  const date = new Date(parts[0], parts[1] - 1, parts[2] + days);
+  return localIsoDate(date);
+}
+
+function formatDate(isoDate) {
+  const parts = String(isoDate || '').split('-');
+  return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : String(isoDate || '');
+}
+
+// Garante que a tratativa sempre tenha um período: início + 14 dias por padrão.
+function normalizeActionPeriod(item) {
+  const startDate = String(item.start_date || '').trim();
+  const endDate = String(item.end_date || '').trim();
+  const safeEnd = endDate && endDate > startDate ? endDate : addDaysIso(startDate, DEFAULT_DURATION_DAYS);
+  return { startDate, endDate: safeEnd || startDate };
 }
 
 function readBranches() {
@@ -53,7 +81,8 @@ function readBranches() {
 function renderPage(alertMsg = '') {
   const actions = readActions().sort((a, b) => b.start_date.localeCompare(a.start_date));
   const branches = readBranches();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = localIsoDate(new Date());
+  const defaultEnd = addDaysIso(today, DEFAULT_DURATION_DAYS);
 
   const totalCount = actions.length;
   const ongoingCount = actions.filter((a) => a.status === 'Em andamento').length;
@@ -65,17 +94,17 @@ function renderPage(alertMsg = '') {
         if (item.status === 'Em andamento') badgeClass = 'badge-prog';
         if (item.status === 'Concluída') badgeClass = 'badge-done';
 
-        const dateParts = (item.start_date || '').split('-');
-        const formattedDate = dateParts.length === 3 ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` : item.start_date;
+        const period = normalizeActionPeriod(item);
 
         return `<tr>
           <td data-label="Filial"><strong>${escapeHtml(item.filial)}</strong></td>
-          <td data-label="Ação" class="td-action">${escapeHtml(item.action)}</td>
-          <td data-label="Início">${escapeHtml(formattedDate)}</td>
+          <td data-label="Tratativa" class="td-action">${escapeHtml(item.action)}</td>
+          <td data-label="Início">${escapeHtml(formatDate(period.startDate))}</td>
+          <td data-label="Término">${escapeHtml(formatDate(period.endDate))}</td>
           <td data-label="Status"><span class="badge ${badgeClass}">${escapeHtml(item.status)}</span></td>
         </tr>`;
       }).join('')
-    : '<tr><td colspan="4" class="empty-state">Nenhuma ação cadastrada até o momento. Preencha o formulário ao lado para iniciar.</td></tr>';
+    : '<tr><td colspan="5" class="empty-state">Nenhuma tratativa cadastrada até o momento. Preencha o formulário ao lado para iniciar.</td></tr>';
 
   const options = branches.map((branch) => `<option value="${escapeHtml(branch)}">`).join('');
 
@@ -279,6 +308,22 @@ function renderPage(alertMsg = '') {
       padding: 20px;
     }
 
+    /* Período da tratativa: início e término lado a lado */
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+    @media (max-width: 420px) {
+      .form-row { grid-template-columns: 1fr; gap: 0; }
+    }
+    .form-hint {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      margin: -4px 0 16px;
+      line-height: 1.4;
+    }
+
     /* Form Ergonomics (Mobile Touch-Friendly) */
     .form-group {
       margin-bottom: 16px;
@@ -461,14 +506,14 @@ function renderPage(alertMsg = '') {
 
   <main>
     <div class="hero">
-      <div class="hero-eyebrow">Melhoria Contínua & Ações</div>
-      <h1>Registro de Ações do PDCA</h1>
-      <p>Cadastre as ações de intervenção operacional por filial. O dashboard cruza automaticamente cada ação com o volume de dano e falta no Diagrama de Gantt.</p>
+      <div class="hero-eyebrow">Melhoria Contínua & Tratativas</div>
+      <h1>Registro de Tratativas do PDCA</h1>
+      <p>Cadastre as tratativas operacionais por filial informando o período (início → término). O dashboard cruza cada tratativa com o PPM Dano e o NC Falta da filial no Diagrama de Gantt.</p>
     </div>
 
     <div class="kpi-strip">
       <div class="kpi-chip">
-        <div class="kpi-chip-title">Total de Ações</div>
+        <div class="kpi-chip-title">Total de Tratativas</div>
         <div class="kpi-chip-value">${totalCount}</div>
       </div>
       <div class="kpi-chip">
@@ -485,7 +530,7 @@ function renderPage(alertMsg = '') {
       <!-- Formulário de Cadastro -->
       <div class="card">
         <div class="card-header">
-          <h2 class="card-title">➕ Nova Ação</h2>
+          <h2 class="card-title">➕ Nova Tratativa</h2>
         </div>
         <div class="card-body">
           <form method="post" action="/actions">
@@ -496,14 +541,21 @@ function renderPage(alertMsg = '') {
             </div>
 
             <div class="form-group">
-              <label for="action">Descrição da Ação</label>
+              <label for="action">Descrição da Tratativa</label>
               <textarea id="action" name="action" required placeholder="Ex.: Reforço de auditoria e conferência de saída de cargas"></textarea>
             </div>
 
-            <div class="form-group">
-              <label for="start_date">Data de Início da Ação</label>
-              <input id="start_date" name="start_date" type="date" value="${today}" required>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="start_date">Data de Início</label>
+                <input id="start_date" name="start_date" type="date" value="${today}" required>
+              </div>
+              <div class="form-group">
+                <label for="end_date">Data Final</label>
+                <input id="end_date" name="end_date" type="date" value="${defaultEnd}" min="${addDaysIso(today, 1)}" required>
+              </div>
             </div>
+            <p class="form-hint">A tratativa é projetada no Gantt exatamente neste intervalo (início → término) e comparada com o PPM Dano e o NC Falta da filial.</p>
 
             <div class="form-group">
               <label for="status">Status</label>
@@ -524,15 +576,16 @@ function renderPage(alertMsg = '') {
       <!-- Lista de Ações Cadastradas -->
       <div class="card">
         <div class="card-header">
-          <h2 class="card-title">📋 Ações Cadastradas (${totalCount})</h2>
+          <h2 class="card-title">📋 Tratativas Cadastradas (${totalCount})</h2>
         </div>
         <div class="table-container">
           <table class="responsive-table">
             <thead>
               <tr>
                 <th>Filial</th>
-                <th>Ação</th>
+                <th>Tratativa</th>
                 <th>Início</th>
+                <th>Término</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -544,6 +597,48 @@ function renderPage(alertMsg = '') {
       </div>
     </div>
   </main>
+
+  <script>
+    // Mantém a data final sempre coerente com a data de início (início + 14 dias).
+    (function () {
+      const DEFAULT_DAYS = ${DEFAULT_DURATION_DAYS};
+      const startInput = document.getElementById('start_date');
+      const endInput = document.getElementById('end_date');
+      if (!startInput || !endInput) return;
+
+      function toIso(date) {
+        const pad = (value) => String(value).padStart(2, '0');
+        return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
+      }
+
+      function fromIso(iso) {
+        const parts = String(iso || '').split('-').map(Number);
+        if (parts.length !== 3 || parts.some((value) => !Number.isFinite(value))) return null;
+        return new Date(parts[0], parts[1] - 1, parts[2]);
+      }
+
+      function shift(iso, days) {
+        const date = fromIso(iso);
+        if (!date) return '';
+        date.setDate(date.getDate() + days);
+        return toIso(date);
+      }
+
+      function syncEndDate(forceDefault) {
+        const start = fromIso(startInput.value);
+        if (!start) return;
+        const minEnd = shift(startInput.value, 1);
+        endInput.min = minEnd;
+        if (forceDefault || !endInput.value || endInput.value < minEnd) {
+          endInput.value = shift(startInput.value, DEFAULT_DAYS);
+        }
+      }
+
+      startInput.addEventListener('change', () => syncEndDate(true));
+      endInput.addEventListener('change', () => syncEndDate(false));
+      syncEndDate(false);
+    })();
+  </script>
 </body>
 </html>`;
 }
@@ -562,14 +657,17 @@ function handleRequest(request, response) {
       const form = new URLSearchParams(body);
       const filial = form.get('filial') || '';
       const action = form.get('action') || '';
-      const startDate = form.get('start_date') || '';
+      const startDate = (form.get('start_date') || '').trim();
+      const endDate = (form.get('end_date') || '').trim();
       const status = form.get('status') || 'Planejada';
 
-      if (filial.trim() && action.trim() && startDate.trim()) {
+      if (filial.trim() && action.trim() && startDate) {
+        const period = normalizeActionPeriod({ start_date: startDate, end_date: endDate });
         saveAction({
           filial: filial.trim(),
           action: action.trim(),
-          start_date: startDate.trim(),
+          start_date: period.startDate,
+          end_date: period.endDate,
           status: status.trim()
         });
       }
